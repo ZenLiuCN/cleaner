@@ -1,7 +1,7 @@
 # cleaner
 
 disk protector for programmer (replacement of [purge](https://github.com/ZenLiuCN/purge)).
-1. this one use requires go>=1.18 (go.mod requires 1.20)
+1. compile requires go>=1.18 (go.mod requires 1.20)
 2. should be able to run any os that go supported (none os spec api used)
 
 ## action
