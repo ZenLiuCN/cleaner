@@ -12,13 +12,131 @@ import (
 	"strings"
 )
 
+type Local struct {
+	ignores []Ignore
+	root    string
+}
+
+func (s *Local) Init(root string) {
+	s.root = root
+}
+func (s *Local) last() (string, *Ignore) {
+	if len(s.ignores) > 0 {
+		return s.ignores[len(s.ignores)-1].Rel, &s.ignores[len(s.ignores)-1]
+	}
+	return "", nil
+}
+
+// find local ignores
+func (s *Local) find(debug uint, path string) {
+	ig := filepath.Join(path, ".gitignore")
+	_, err := os.Stat(ig)
+	if err == nil {
+		if debug > 0 {
+			fmt.Println("Local config: " + ig)
+		}
+		s.AddLocal(ig, true)
+	}
+	ig = filepath.Join(path, ".cleanignore")
+	_, err = os.Stat(ig)
+	if err == nil {
+		if debug > 0 {
+			fmt.Println("Local config: " + ig)
+		}
+		s.AddLocal(ig, false)
+
+	}
+}
+
+// AddLocal add local ignores
+func (s *Local) AddLocal(path string, git bool) {
+	rel := strings.TrimPrefix(filepath.ToSlash(filepath.Dir(path))+"/", s.root)
+	if len(s.ignores) != 0 {
+		pre, li := s.last()
+		if pre == rel {
+			if git {
+				li.Merge(NewIgnore(path), false)
+			} else {
+				li.Merge(NewIgnore(path), true)
+			}
+			return
+		}
+	}
+	i := NewIgnore(path)
+	i.Rel = rel
+	s.ignores = append(s.ignores, i)
+}
+
+// Check path change and pop local ignores
+func (s *Local) Check(debug uint, path string, isDir bool) {
+	rel := strings.TrimPrefix(filepath.ToSlash(path), s.root)
+	if isDir {
+		rel += "/"
+	}
+	if len(s.ignores) != 0 {
+		n := len(s.ignores) - 1
+		var i int
+		for i = n; i >= 0; i-- {
+			dir := s.ignores[i].Rel
+			if rel == dir {
+				if i < n {
+					fmt.Printf("pop: %s =>%s\n", dir, path)
+					s.ignores = s.ignores[:i+1]
+				}
+				return
+			}
+			if strings.HasPrefix(rel, dir) {
+				break
+			}
+		}
+		if i != -1 {
+			if i < n {
+				s.ignores = s.ignores[:i+1]
+			}
+			if isDir {
+				s.find(debug, path)
+			}
+			return
+		}
+	}
+	if isDir {
+		s.find(debug, path)
+	}
+
+}
+
+// Matches check if matched by local ignores
+func (s *Local) Matches(path, rel string, isDir, hit bool) (r string, k bool) {
+	var t bool
+	var h string
+	for j := len(s.ignores) - 1; j >= 0; j-- {
+		if !strings.HasPrefix(rel, s.ignores[j].Rel) {
+			return
+		}
+		rr := strings.TrimPrefix(rel, s.ignores[j].Rel)
+		if t, k, h = s.ignores[j].clean(rr, isDir, hit); t {
+			if hit {
+				r = path + "\t" + h
+				return
+			} else {
+				r = path
+				return
+			}
+		} else if k {
+			return
+		}
+	}
+	return
+}
+
 type Ignore struct {
 	Path      string //config file path
+	Rel       string //context relative path used by Local
 	IgnoreDir []*regexp.Regexp
 	Ignore    []*regexp.Regexp
 	KeepDir   []*regexp.Regexp
 	Keep      []*regexp.Regexp
-	Debug     bool
+	Debug     uint
 }
 
 // NewIgnore parse .ignore file. if any error happened will panic
@@ -30,18 +148,25 @@ func NewIgnore(path string) Ignore {
 	i.Path = path
 	for sc.Scan() {
 		txt := sc.Text()
+		txt = strings.TrimSpace(txt)
 		switch {
-		case txt[0] == '#':
 		case len(txt) == 0:
+		case txt[0] == '#':
 		default:
+			if txt[len(txt)-1] == '\\' {
+				txt += " "
+			}
 			dir := txt[len(txt)-1] == '/' || (txt[len(txt)-1] == '*' && txt[len(txt)-2] == '*')
 			switch {
 			case txt[0] == '!':
-				if dir {
-					i.KeepDir = append(i.KeepDir, Compile(txt[1:]))
-				} else {
-					i.Keep = append(i.Keep, Compile(txt[1:]))
+				if len(txt) > 1 {
+					if dir {
+						i.KeepDir = append(i.KeepDir, Compile(txt[1:]))
+					} else {
+						i.Keep = append(i.Keep, Compile(txt[1:]))
+					}
 				}
+
 			case txt[0] == '\\' && txt[1] == '!':
 				if dir {
 					i.IgnoreDir = append(i.IgnoreDir, Compile(txt[1:]))
@@ -64,80 +189,20 @@ func NewIgnore(path string) Ignore {
 // Matches returns ignored file and directories or none ignored (with
 // Reverse=true).this will auto discovery sub ignore files. this should only call
 // once for it won't keep original state.
-func (i Ignore) Matches(root string) (r []string) {
+func (i Ignore) Matches(root string, hit bool) (r []string) {
 	root = fn.Panic1(filepath.Abs(root))
 	if !os.IsPathSeparator(root[len(root)-1]) {
 		root = root + string(filepath.Separator)
 	}
-	var ignores []Ignore
-	var last []string
-	addLocal := func(path, rel string, git bool) {
-		if len(last) == 0 {
-			last = append(last, rel)
-		} else if last[len(last)-1] != rel {
-			last = append(last, rel)
-		} else {
-			li := ignores[len(ignores)-1]
-			if git {
-				li.Merge(NewIgnore(path), false)
-			} else {
-				li.Merge(NewIgnore(path), true)
-			}
-			return
-		}
-		if git {
-			ignores = append(ignores, NewIgnore(path))
-		} else {
-			ignores = append(ignores, NewIgnore(path))
-		}
-	}
-	checkLocal := func(rel string) {
-		if len(last) == 0 {
-			return
-		}
-		if strings.HasPrefix(rel, last[len(last)-1]) {
-			return
-		}
-		ignores = ignores[:len(ignores)-1]
-		if len(ignores) == 0 {
-			last = nil
-		} else {
-			last = last[:len(last)-1]
-		}
-	}
-	findLocal := func(path string) {
-		ig := filepath.Join(path, ".gitignore")
-		_, err := os.Stat(ig)
-		if err == nil {
-			if i.Debug {
-				fmt.Println("found local config: " + ig)
-			}
-			addLocal(ig, strings.TrimPrefix(path, root), true)
-
-		}
-		ig = filepath.Join(path, ".cleanignore")
-		_, err = os.Stat(ig)
-		if err == nil {
-			if i.Debug {
-				fmt.Println("found local config: " + ig)
-			}
-			addLocal(ig, strings.TrimPrefix(path, root), false)
-
-		}
-	}
-	findLocal(root)
-	var lastPath string
+	local := new(Local)
+	local.Init(filepath.ToSlash(root))
+	local.Check(i.Debug, root, true)
 	fn.Panic(filepath.Walk(root, func(path string, info fs.FileInfo, err error) error {
 		rel := strings.TrimPrefix(path, root)
 		if rel == "" {
 			return nil
 		}
-		if lastPath == "" && info.IsDir() {
-			lastPath = path
-		} else if info.IsDir() && lastPath != path {
-			findLocal(path)
-		}
-		checkLocal(rel)
+		local.Check(i.Debug, path, info.IsDir())
 		if err != nil {
 			if info.IsDir() {
 				_, _ = fmt.Fprintf(os.Stderr, "reading %s fail,skip", path)
@@ -145,23 +210,40 @@ func (i Ignore) Matches(root string) (r []string) {
 			}
 			return err
 		}
-		if i.clean(rel, info.IsDir()) {
-			r = append(r, path)
+		rel = filepath.ToSlash(rel)
+		if info.IsDir() {
+			rel += "/"
+			path += string(filepath.Separator)
+		}
+		var t, k bool
+		var h string
+		h = filepath.Base(rel)
+		if info.IsDir() {
+			h += "/"
+		}
+		if t, k, h = i.clean(h, info.IsDir(), hit); t {
+			if hit {
+				r = append(r, path+"\t"+h)
+			} else {
+				r = append(r, path)
+			}
 			if info.IsDir() {
 				return filepath.SkipDir
 			}
-		} else {
-			for j := 0; j < len(ignores); j++ {
-				if ignores[j].clean(rel, info.IsDir()) {
-					r = append(r, path)
-					if info.IsDir() {
-						return filepath.SkipDir
-					}
-					return nil
+		} else if !k {
+			if h, k = local.Matches(path, rel, info.IsDir(), hit); h != "" {
+				if !k {
+					r = append(r, h)
 				}
+				if info.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
 			}
 		}
-
+		if k && info.IsDir() {
+			return filepath.SkipDir
+		}
 		return nil
 	}))
 	return
@@ -183,46 +265,56 @@ func (i *Ignore) Merge(ig Ignore, higher bool) {
 	}
 }
 
-func (i Ignore) clean(rel string, dir bool) bool {
+func (i Ignore) clean(rel string, dir bool, hit bool) (c, k bool, s string) {
 	if dir {
 		for _, r := range i.KeepDir {
 			if r.MatchString(rel) {
-				if i.Debug {
-					fmt.Printf("keep: %s by %s  in %s\n", rel, r.String(), i.Path)
+				if i.Debug > 1 {
+					fmt.Printf("[D]keep: %s by %s  in %s\n", rel, r.String(), i.Path)
 				}
-				return false
+				k = true
+				return
 			}
 		}
 		for _, r := range i.IgnoreDir {
 			if r.MatchString(rel) {
-				if i.Debug {
-					fmt.Printf("match: %s by %s  in %s\n", rel, r.String(), i.Path)
+				if i.Debug > 0 {
+					fmt.Printf("[D]match: %s by %s  in %s\n", rel, r.String(), i.Path)
 				}
-				return true
+				if hit {
+					s = fmt.Sprintf("%s [I]\t%s", i.Path, r)
+				}
+				c = true
+				return
 			}
 		}
 	} else {
 		for _, r := range i.Keep {
 			if r.MatchString(rel) {
-				if i.Debug {
-					fmt.Printf("keep: %s by %s  in %s\n", rel, r.String(), i.Path)
+				if i.Debug > 1 {
+					fmt.Printf("[F]keep: %s\t%s\t%s\n", rel, i.Path, r.String())
 				}
-				return false
+				k = true
+				return
 			}
 		}
 		for _, r := range i.Ignore {
 			if r.MatchString(rel) {
-				if i.Debug {
-					fmt.Printf("match: %s by %s  in %s\n", rel, r.String(), i.Path)
+				if i.Debug > 0 {
+					fmt.Printf("[F]match: %s\t%s\t%s\n", rel, i.Path, r.String())
 				}
-				return true
+				if hit {
+					s = fmt.Sprintf("%s [I]\t%s", i.Path, r)
+				}
+				c = true
+				return
 			}
 		}
 	}
-	if i.Debug {
+	if i.Debug > 2 {
 		fmt.Printf("ignore: %s\n", rel)
 	}
-	return false
+	return
 }
 
 // Append extra higher priorities patterns which not
@@ -268,63 +360,99 @@ func (i *Ignore) Append(extra []string) {
 
 // Compile compile a string git ignore pattern to regexp
 func Compile(ig string) *regexp.Regexp {
+	ig = strings.TrimSpace(ig)
+	if ig[len(ig)-1] == '\\' {
+		ig += " "
+	}
 	p := new(strings.Builder)
+	p.Grow(len(ig))
 	n := len(ig) - 1
+	sb := false
+	if len(ig) >= 2 && ig[:2] != "**" {
+		p.WriteRune('^')
+	}
+	var c byte
 	for i := 0; i < len(ig); i++ {
-		c := ig[i]
+		c = ig[i]
 		switch {
+		//glob
+		case c == '[' && !sb:
+			sb = true
+		case c == ']' && sb:
+			sb = false
+		//translate
+		case c == '*' && i < n-1 && ig[i+1] == '*' && ig[i+2] == '/':
+			p.WriteString(".*")
+			i += 2
 		case c == '*' && i != n && ig[i+1] == '*':
 			p.WriteString(".*")
+			i += 1
 		case c == '*':
 			p.WriteString("[^/]*")
-		case c == '.':
-			p.WriteString("\\.")
 		case c == '\\':
 			p.WriteByte(ig[i+1])
 			i++
+		case c == '!' && sb: //unix glob
+			p.WriteString("^")
+		case c == '?':
+			p.WriteString(".")
+		//escape
+		case c == '+' && !sb:
+			p.WriteString("\\+")
+
+		//other escape
+		case c == '.':
+			p.WriteString("\\.")
+		case c == '|':
+			p.WriteString("\\|")
+		case c == '$':
+			p.WriteString("\\$")
+		case c == '^':
+			p.WriteString("\\^")
+		case c == '{':
+			p.WriteString("\\{")
+		case c == '}':
+			p.WriteString("\\}")
 		case c == '(':
 			p.WriteString("\\(")
 		case c == ')':
 			p.WriteString("\\)")
-		case c == '?':
-			p.WriteString(".?")
+
 		default:
 			p.WriteByte(c)
 		}
+	}
+	if c != '/' {
+		p.WriteRune('$') //end the file
 	}
 	return regexp.MustCompile(p.String())
 }
 
 // Load from global and user config
-func Load(debug bool) (r Ignore) {
+func Load(debug uint) (r Ignore) {
 	g := false
 	str, _ := os.Executable()
 	str, _ = filepath.EvalSymlinks(str)
 	if str != "" {
-		global := filepath.Join(filepath.Dir(str), ".cleaner")
+		global := filepath.Join(filepath.Dir(str), ".cleanignore")
 		_, err := os.Stat(global)
 		if err == nil {
-			if debug {
-				fmt.Println("found Global config at " + global)
+			if debug > 0 {
+				fmt.Println("GLOBAL config: " + global)
 			}
 			r = NewIgnore(global)
 			g = true
 		}
-	} else if debug {
-		fmt.Println("not found Global config at " + str)
 	}
 	str, _ = os.UserHomeDir()
 	if str == "" {
-		if debug {
-			fmt.Println("not found user config at " + str)
-		}
 		return
 	}
-	user := filepath.Join(str, ".cleaner")
+	user := filepath.Join(str, ".cleanignore")
 	_, err := os.Stat(user)
 	if err == nil {
-		if debug {
-			fmt.Println("found user config at " + user)
+		if debug > 0 {
+			fmt.Println("USER config: " + user)
 		}
 		if !g {
 			r = NewIgnore(user)
