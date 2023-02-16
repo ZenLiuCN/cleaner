@@ -52,7 +52,7 @@ Note: .cleanignore's ignored files (without '!' prefix) means to be cleaned.
 			dbg := c.Uint("d")
 			hit := c.Bool("t")
 			in := c.Path("i")
-			p := c.Bool("p")
+			p := c.Bool("e")
 			if hit && (in != "" || p) {
 				return errors.New("hit can not use with -e | -p | -i")
 			}
