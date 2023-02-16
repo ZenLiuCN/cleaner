@@ -111,7 +111,7 @@ Note: .cleanignore's ignored files (without '!' prefix) means to be cleaned.
 			if p {
 				purify(dbg, r)
 				if out == "" {
-					fmt.Printf("Cleaned: %d entries", len(r))
+					fmt.Printf("Cleaned: %d entries\n", len(r))
 				}
 			} else if out == "" {
 				fmt.Println("Clean entries:")
